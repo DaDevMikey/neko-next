@@ -6,6 +6,7 @@ require (
 	crg.eti.br/go/config v1.5.0
 	github.com/getlantern/systray v1.2.2
 	github.com/hajimehoshi/ebiten/v2 v2.8.9
+	golang.org/x/sys v0.36.0
 )
 
 require (
@@ -24,7 +25,6 @@ require (
 	github.com/jezek/xgb v1.1.1 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
