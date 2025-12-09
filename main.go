@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"image"
 	_ "image/png"
 	"io"
@@ -13,22 +14,22 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
+	_ "crg.eti.br/go/config/ini"
 	"github.com/getlantern/systray"
 	"github.com/hajimehoshi/ebiten/v2"
-
 	"github.com/hajimehoshi/ebiten/v2/audio"
 	"github.com/hajimehoshi/ebiten/v2/audio/wav"
-
-	"crg.eti.br/go/config"
-	_ "crg.eti.br/go/config/ini"
+	"golang.org/x/sys/windows/registry"
 )
 
 // --- Windows API for Global Mouse Position ---
 var (
-	user32           = syscall.NewLazyDLL("user32.dll")
-	procGetCursorPos = user32.NewProc("GetCursorPos")
+	user32               = syscall.NewLazyDLL("user32.dll")
+	procGetCursorPos     = user32.NewProc("GetCursorPos")
+	procGetSystemMetrics = user32.NewProc("GetSystemMetrics")
 )
 
 type POINT struct {
@@ -41,20 +42,35 @@ func getGlobalMousePos() (int, int) {
 	return int(pt.X), int(pt.Y)
 }
 
+const (
+	SM_CXSCREEN = 0
+	SM_CYSCREEN = 1
+)
+
+func getPrimaryScreenRect() (w, h int) {
+	r1, _, _ := procGetSystemMetrics.Call(uintptr(SM_CXSCREEN))
+	r2, _, _ := procGetSystemMetrics.Call(uintptr(SM_CYSCREEN))
+	return int(r1), int(r2)
+}
+
 // ---------------------------------------------
 
 type neko struct {
-	waiting    bool
-	x          float64
-	y          float64
-	distance   int
-	count      int
-	min        int
-	max        int
-	state      int
-	sprite     string
-	lastSprite string
-	img        *ebiten.Image
+	waiting             bool
+	x                   float64
+	y                   float64
+	distance            int
+	count               int
+	min                 int
+	max                 int
+	state               int
+	sprite              string
+	lastSprite          string
+	lastSleepToggleTime time.Time // For debouncing sleep shortcut
+	img                 *ebiten.Image
+
+	// cmdChan is used to send commands from the systray to the game loop safely.
+	cmdChan chan func(*neko)
 }
 
 type Config struct {
@@ -63,6 +79,8 @@ type Config struct {
 	Alpha            float64 `cfg:"alpha" cfgDefault:"1.0"` // Transparency
 	Quiet            bool    `cfg:"quiet" cfgDefault:"false"`
 	MousePassthrough bool    `cfg:"mousepassthrough" cfgDefault:"true"`
+	StayOnPrimary    bool    `cfg:"stayonprimary" cfgDefault:"true"`
+	RunOnStartup     bool    `cfg:"runonstartup" cfgDefault:"false"`
 }
 
 const (
@@ -77,15 +95,22 @@ var (
 	//go:embed assets/*
 	f embed.FS
 
-	monitorWidth, monitorHeight = ebiten.Monitor().Size()
-	cfg                         = &Config{}
+	monitorWidth, monitorHeight               = ebiten.Monitor().Size()
+	cfg                                       = &Config{}
 	currentplayer               *audio.Player = nil
 
 	// Tray Menu Items
-	mClickThrough *systray.MenuItem
-	mSleep        *systray.MenuItem
-	mTeleport     *systray.MenuItem // New feature!
+	mClickThrough  *systray.MenuItem
+	mSleep         *systray.MenuItem
+	mTeleport      *systray.MenuItem // New feature!
+	mStayOnPrimary *systray.MenuItem
+	mRunOnStartup  *systray.MenuItem
 )
+
+// sendCmd safely sends a function to be executed on the main game thread.
+func (m *neko) sendCmd(cmd func(*neko)) {
+	m.cmdChan <- cmd
+}
 
 func (m *neko) Layout(outsideWidth, outsideHeight int) (int, int) {
 	return width, height
@@ -104,8 +129,19 @@ func playSound(sound []byte) {
 }
 
 func (m *neko) Update() error {
-	// Force "Always on Top" behavior
-	ebiten.SetWindowFloating(true)
+	// Process all pending commands from the systray channel.
+	// This is the only safe way to modify neko's state from another goroutine.
+processCmds:
+	for {
+		select {
+		case cmd := <-m.cmdChan:
+			cmd(m)
+		default:
+			break processCmds
+		}
+	}
+
+	ebiten.SetWindowFloating(true) // Ensure window stays on top.
 
 	m.count++
 	if m.state == 10 && m.count == m.min {
@@ -116,28 +152,47 @@ func (m *neko) Update() error {
 	mx, my := getGlobalMousePos()
 
 	// 2. Fix for DPI Scaling (The "Offset" Bug Fix)
-	// We divide the physical coordinates by the scale factor to get logical coordinates
+	// We divide the physical mouse coordinates by the monitor's scale factor
+	// to get the correct target coordinates in the logical space Ebiten uses.
 	scaleFactor := ebiten.Monitor().DeviceScaleFactor()
-	mx = int(float64(mx) / scaleFactor)
-	my = int(float64(my) / scaleFactor)
+	targetX := float64(mx)
+	targetY := float64(my)
 
-	// Calculate target position (center of the cat)
-	// Current window position
-	wx, wy := int(m.x), int(m.y)
-	
-	// Target is where the mouse is, centered relative to the cat's size
-	trgX := mx - (int(float64(width)*cfg.Scale) / 2)
-	trgY := my - (int(float64(height)*cfg.Scale) / 2)
+	// The cat's position (m.x, m.y) is in physical pixels.
+	// The target is the mouse position, adjusted so the cat's center is on the cursor.
+	winWidth, winHeight := ebiten.WindowSize()
+	trgX := targetX - (float64(winWidth) * scaleFactor / 2)
+	trgY := targetY - (float64(winHeight) * scaleFactor / 2)
 
-	dx := trgX - wx
-	dy := trgY - wy
-
+	dx := int(trgX - m.x)
+	dy := int(trgY - m.y)
 	m.distance = int(math.Sqrt(float64(dx*dx + dy*dy)))
 
 	// Check if Neko is sleeping or waiting
 	if m.waiting {
 		m.stayIdle()
 		return nil
+	}
+
+	// Stay on Primary Check
+	if cfg.StayOnPrimary {
+		pw, ph := getPrimaryScreenRect()
+		if mx < 0 || mx > pw || my < 0 || my > ph {
+			if !m.waiting { // Only send the command if not already sleeping
+				m.sendCmd(func(n *neko) {
+					n.waiting = true
+					n.state = 13 // Force sleep animation
+				})
+			}
+			return nil
+		} else {
+			if m.waiting { // If back on primary and was sleeping, wake up
+				m.sendCmd(func(n *neko) {
+					n.waiting = false
+					n.state = 0 // Reset state to allow normal animation
+				})
+			}
+		}
 	}
 
 	// If close enough to the mouse, stop moving
@@ -152,7 +207,7 @@ func (m *neko) Update() error {
 
 	// Move towards the mouse
 	angle := math.Atan2(float64(dy), float64(dx))
-	
+
 	moveX := math.Cos(angle) * cfg.Speed
 	moveY := math.Sin(angle) * cfg.Speed
 
@@ -160,12 +215,15 @@ func (m *neko) Update() error {
 	m.y += moveY
 
 	// Keep within monitor bounds
-	// Note: We use raw logical pixels here, assuming single monitor for simplicity
+	// Note: We use physical pixels here, assuming single monitor for simplicity
 	// (Multi-monitor clamping is complex, so we just clamp to 0,0 min)
-	m.x = math.Max(0, m.x) 
+	m.x = math.Max(0, m.x)
 	m.y = math.Max(0, m.y)
-	
-	ebiten.SetWindowPosition(int(m.x), int(m.y))
+
+	// SetWindowPosition expects logical pixels, so we convert back.
+	logicalX := int(m.x / scaleFactor)
+	logicalY := int(m.y / scaleFactor)
+	ebiten.SetWindowPosition(logicalX, logicalY)
 
 	// Determine sprite direction
 	m.catchCursor(dx, dy)
@@ -177,16 +235,21 @@ func (m *neko) stayIdle() {
 	case 0:
 		m.state = 1
 		fallthrough
-	case 1, 2, 3:
+	case 1:
 		m.sprite = "awake"
-	case 4, 5, 6:
+	case 2, 3:
+		m.sprite = "alert"
+	case 4, 5:
 		m.sprite = "scratch"
-	case 7, 8, 9:
+	case 6, 7:
 		m.sprite = "wash"
-	case 10, 11, 12:
+	case 8, 9:
 		m.min = 32
 		m.max = 64
 		m.sprite = "yawn"
+	case 10, 11, 12:
+		// Additional idle time before sleeping
+		m.sprite = "awake"
 	default:
 		m.sprite = "sleep"
 	}
@@ -232,6 +295,11 @@ func (m *neko) Draw(screen *ebiten.Image) {
 	}
 
 	m.img = mSprite[sprite]
+	if m.img == nil {
+		log.Printf("Warning: Missing sprite image for '%s'. Using 'awake'.", sprite)
+		m.img = mSprite["awake"] // Fallback to a known good sprite
+		// If even "awake" is missing, we have a bigger problem, but at least we won't crash here.
+	}
 
 	if m.count > m.max {
 		m.count = 0
@@ -244,17 +312,13 @@ func (m *neko) Draw(screen *ebiten.Image) {
 		}
 	}
 
-	if m.lastSprite == sprite {
-		return
-	}
-
-	m.lastSprite = sprite
+	// Always clear the screen to ensure transparency works correctly.
 	screen.Clear()
-	
+
 	// Apply Transparency (Ghost Mode)
 	op := &ebiten.DrawImageOptions{}
 	op.ColorScale.ScaleAlpha(float32(cfg.Alpha))
-	
+
 	screen.DrawImage(m.img, op)
 }
 
@@ -263,22 +327,24 @@ func (m *neko) Draw(screen *ebiten.Image) {
 func onReady() {
 	iconData, _ := f.ReadFile("assets/awake.png")
 	systray.SetIcon(iconData)
-	systray.SetTitle("Neko")
-	systray.SetTooltip("Neko - The Desktop Cat")
+	systray.SetTitle("Neko Next")
+	systray.SetTooltip("Neko Next- The Upgraded Desktop Cat")
 
 	mSleep = systray.AddMenuItemCheckbox("Sleep", "Put Neko to sleep", false)
 	mTeleport = systray.AddMenuItem("Teleport to Mouse", "Bring Neko to you immediately")
-	
+
 	systray.AddSeparator()
+	mStayOnPrimary = systray.AddMenuItemCheckbox("Stay on Primary", "Put Neko to sleep when leaving the main screen", cfg.StayOnPrimary)
 
 	mClickThrough = systray.AddMenuItemCheckbox("Click Through", "Let mouse clicks pass through Neko", cfg.MousePassthrough)
 	mSoundMenu := systray.AddMenuItemCheckbox("Sound", "Enable/Disable sound", !cfg.Quiet)
-	
+
 	// Speed Menu
 	mSpeed := systray.AddMenuItem("Speed", "Change running speed")
 	mSpeedSlow := mSpeed.AddSubMenuItem("Slow", "Slow speed")
 	mSpeedNormal := mSpeed.AddSubMenuItem("Normal", "Normal speed")
 	mSpeedFast := mSpeed.AddSubMenuItem("Zoomies!", "Fast speed")
+	mSpeedLudicrous := mSpeed.AddSubMenuItem("Ludicrous!", "Ludicrous speed")
 
 	// Size Menu
 	mScale := systray.AddMenuItem("Size", "Change size")
@@ -293,30 +359,50 @@ func onReady() {
 	mAlphaInvisible := mAlpha.AddSubMenuItem("Ninja (20%)", "Almost invisible")
 
 	systray.AddSeparator()
+	mRunOnStartup = systray.AddMenuItemCheckbox("Run on Startup", "Start automatically with Windows", cfg.RunOnStartup)
 	mQuit := systray.AddMenuItem("Exit", "Bye bye Neko")
 
 	go func() {
 		for {
 			select {
 			case <-mQuit.ClickedCh:
+				// Save settings before quitting
+				saveSettings()
 				systray.Quit()
-			
+
 			// Teleport Logic
 			case <-mTeleport.ClickedCh:
-				mx, my := getGlobalMousePos()
-				s := ebiten.Monitor().DeviceScaleFactor()
-				nekoInstance.x = float64(mx) / s
-				nekoInstance.y = float64(my) / s
-				ebiten.SetWindowPosition(int(nekoInstance.x), int(nekoInstance.y))
+				nekoInstance.sendCmd(func(n *neko) {
+					mx, my := getGlobalMousePos()
+					// Set position in physical pixels
+					n.x = float64(mx)
+					n.y = float64(my)
+				})
 
 			case <-mSleep.ClickedCh:
 				if mSleep.Checked() {
 					mSleep.Uncheck()
-					nekoInstance.waiting = false
+					nekoInstance.sendCmd(func(n *neko) { n.waiting = false })
 				} else {
 					mSleep.Check()
-					nekoInstance.waiting = true
-					nekoInstance.state = 13 // Force sleep animation
+					nekoInstance.sendCmd(func(n *neko) {
+						n.waiting = true
+						n.state = 13 // Force sleep animation
+					})
+				}
+			case <-mStayOnPrimary.ClickedCh:
+				if mStayOnPrimary.Checked() {
+					mStayOnPrimary.Uncheck()
+					cfg.StayOnPrimary = false
+				} else {
+					mStayOnPrimary.Check()
+					cfg.StayOnPrimary = true
+				}
+			case <-mRunOnStartup.ClickedCh:
+				if mRunOnStartup.Checked() {
+					setStartup(false)
+				} else {
+					setStartup(true)
 				}
 			case <-mClickThrough.ClickedCh:
 				if mClickThrough.Checked() {
@@ -335,7 +421,7 @@ func onReady() {
 					mSoundMenu.Check()
 					cfg.Quiet = false
 				}
-			
+
 			// Speed
 			case <-mSpeedSlow.ClickedCh:
 				cfg.Speed = 1.0
@@ -343,7 +429,9 @@ func onReady() {
 				cfg.Speed = 2.0
 			case <-mSpeedFast.ClickedCh:
 				cfg.Speed = 4.0
-			
+			case <-mSpeedLudicrous.ClickedCh:
+				cfg.Speed = 8.0
+
 			// Scale
 			case <-mScaleSmall.ClickedCh:
 				updateScale(1.0)
@@ -369,6 +457,44 @@ func updateScale(s float64) {
 	ebiten.SetWindowSize(int(float64(width)*s), int(float64(height)*s))
 }
 
+func saveSettings() {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		log.Printf("Error marshaling settings: %v", err)
+		return
+	}
+	err = os.WriteFile("neko_settings.json", data, 0666)
+	if err != nil {
+		log.Printf("Error saving settings to neko_settings.json: %v", err)
+	}
+}
+
+func setStartup(enabled bool) {
+	cfg.RunOnStartup = enabled
+	if mRunOnStartup != nil {
+		if enabled {
+			mRunOnStartup.Check()
+		} else {
+			mRunOnStartup.Uncheck()
+		}
+	}
+
+	key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.SET_VALUE)
+	if err != nil {
+		log.Printf("Error opening registry key: %v", err)
+		return
+	}
+	defer key.Close()
+
+	if enabled {
+		exePath, _ := os.Executable()
+		err = key.SetStringValue("Neko", `"`+exePath+`"`)
+	} else {
+		err = key.DeleteValue("Neko")
+	}
+	log.Printf("Run on startup set to %v. Error: %v", enabled, err)
+}
+
 func onExit() {
 	os.Exit(0)
 }
@@ -376,16 +502,36 @@ func onExit() {
 var nekoInstance *neko
 
 func main() {
-	config.PrefixEnv = "NEKO"
-	config.File = "neko.ini"
-	config.Parse(cfg)
+	// Setup file-based logging to capture errors.
+	logFile, err := os.OpenFile("neko.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("error opening log file: %v", err)
+	}
+	defer logFile.Close()
+	mw := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(mw)
 
-	// Default to Click Through = TRUE
-	cfg.MousePassthrough = true 
+	log.Println("Starting Neko...")
 
+	// Load settings from JSON file.
+	data, err := os.ReadFile("neko_settings.json")
+	if err == nil {
+		err = json.Unmarshal(data, cfg)
+		if err != nil {
+			log.Printf("Error unmarshaling settings: %v", err)
+		}
+	} else {
+		log.Println("No neko_settings.json found, using defaults.")
+	}
+
+	// Set startup registry key based on loaded config
+	setStartup(cfg.RunOnStartup)
+
+	// Systray must run in a separate goroutine.
 	go func() {
 		systray.Run(onReady, onExit)
 	}()
+	log.Println("System tray routine started.")
 
 	mSprite = make(map[string]*ebiten.Image)
 	mSound = make(map[string][]byte)
@@ -400,30 +546,34 @@ func main() {
 		case ".png":
 			img, _, err := image.Decode(bytes.NewReader(data))
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("Error decoding png %s: %v", name, err)
+				continue
 			}
 			mSprite[name] = ebiten.NewImageFromImage(img)
 		case ".wav":
 			stream, err := wav.DecodeWithSampleRate(44100, bytes.NewReader(data))
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("Error decoding wav %s: %v", name, err)
+				continue
 			}
 			data, err := io.ReadAll(stream)
 			if err != nil {
-				log.Fatal(err)
+				log.Printf("Error reading wav stream %s: %v", name, err)
+				continue
 			}
 			mSound[name] = data
 		}
 	}
+	log.Println("Assets loaded.")
 
 	audio.NewContext(44100)
-	audio.CurrentContext().NewPlayerFromBytes([]byte{}).Play()
 
 	nekoInstance = &neko{
-		x:   float64(monitorWidth / 2),
-		y:   float64(monitorHeight / 2),
-		min: 8,
-		max: 16,
+		x:       float64(monitorWidth / 2),
+		y:       float64(monitorHeight / 2),
+		min:     8,
+		max:     16,
+		cmdChan: make(chan func(*neko), 10), // Buffered channel for commands
 	}
 
 	ebiten.SetRunnableOnUnfocused(true)
@@ -432,20 +582,20 @@ func main() {
 	ebiten.SetVsyncEnabled(true)
 	ebiten.SetWindowDecorated(false)
 	ebiten.SetWindowFloating(true)
-	
+
 	// Set click-through state at startup
 	ebiten.SetWindowMousePassthrough(cfg.MousePassthrough)
 	ebiten.SetWindowSize(int(float64(width)*cfg.Scale), int(float64(height)*cfg.Scale))
 	ebiten.SetWindowTitle("Neko")
 
-	err := ebiten.RunGameWithOptions(nekoInstance, &ebiten.RunGameOptions{
+	log.Println("Starting Ebiten game loop...")
+	if err := ebiten.RunGameWithOptions(nekoInstance, &ebiten.RunGameOptions{
 		InitUnfocused:     true,
 		ScreenTransparent: true,
 		SkipTaskbar:       true,
 		X11ClassName:      "Neko",
 		X11InstanceName:   "Neko",
-	})
-	if err != nil {
+	}); err != nil {
 		log.Fatal(err)
 	}
 }
