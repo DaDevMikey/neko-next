@@ -2,19 +2,33 @@
 
 ![Neko](https://raw.githubusercontent.com/crgimenes/neko/master/assets/awake.png)
 
+> ⚠️ **WARNING: This is a modded version of Neko!**
+>
+> This fork is **Windows-only** and may contain modifications that are not compatible with other operating systems (macOS, Linux, etc.).
+>
+> For the original cross-platform version, please visit the [original repository](https://github.com/crgimenes/neko).
+
 [Neko](https://en.wikipedia.org/wiki/Neko_(software)) is a cat that chases the mouse cursor across the screen, an app written in the late 1980s and ported for many platforms.
 
 ![Neco](https://github.com/crgimenes/neko/blob/master/fixtures/neko.gif)
 
-This code is a re-implementation using Golang and **has no relationship to the original software**. Furthermore, this version does not use any part of the original source code except sprites and sounds.
+This code is a re-implementation using Golang and **has no relationship to the original software**. Furthermore, this version does not use any part of the original source code except sprites and some ideas from the original behavior.
 
 The goal is to demonstrate the Go language with a fun and very nostalgic example, without necessarily being tied to the behavior of the original version.
 
 In this example, we used the [Ebitengine](https://ebitengine.org), an incredibly easy-to-use gaming library with a vibrant community.
 
+## System Requirements
+
+| Platform | Supported |
+|----------|-----------|
+| Windows  | ✅ Yes    |
+| macOS    | ❌ No     |
+| Linux    | ❌ No     |
+
 ## How to run
 
-Note that some operating systems may restrict the execution of binaries downloaded from the internet for security reasons. Please consult your operating system documentation to learn how to enable Neko to run.
+Note that some operating systems may restrict the execution of binaries downloaded from the internet for security reasons. Please consult your operating system documentation to learn how to enable the execution of downloaded binaries.
 
 ```bash
 export CGO_ENABLED=1
