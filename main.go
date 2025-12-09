@@ -43,8 +43,12 @@ func getGlobalMousePos() (int, int) {
 }
 
 const (
-	SM_CXSCREEN = 0
-	SM_CYSCREEN = 1
+	SM_CXSCREEN        = 0
+	SM_CYSCREEN        = 1
+	SM_XVIRTUALSCREEN  = 76 // Left of virtual screen (can be negative)
+	SM_YVIRTUALSCREEN  = 77 // Top of virtual screen (can be negative)
+	SM_CXVIRTUALSCREEN = 78 // Width of virtual screen
+	SM_CYVIRTUALSCREEN = 79 // Height of virtual screen
 )
 
 func getPrimaryScreenRect() (w, h int) {
@@ -53,10 +57,23 @@ func getPrimaryScreenRect() (w, h int) {
 	return int(r1), int(r2)
 }
 
+// getVirtualScreenBounds returns the bounds of the entire virtual screen
+// (all monitors combined). Coordinates can be negative for monitors
+// positioned to the left or above the primary monitor.
+func getVirtualScreenBounds() (x, y, w, h int) {
+	x1, _, _ := procGetSystemMetrics.Call(uintptr(SM_XVIRTUALSCREEN))
+	y1, _, _ := procGetSystemMetrics.Call(uintptr(SM_YVIRTUALSCREEN))
+	w1, _, _ := procGetSystemMetrics.Call(uintptr(SM_CXVIRTUALSCREEN))
+	h1, _, _ := procGetSystemMetrics.Call(uintptr(SM_CYVIRTUALSCREEN))
+	return int(int32(x1)), int(int32(y1)), int(w1), int(h1)
+}
+
 // ---------------------------------------------
 
 type neko struct {
 	waiting             bool
+	manualSleep         bool // Track if sleep was triggered manually (vs StayOnPrimary)
+	hidden              bool // Temporarily hide the cat
 	x                   float64
 	y                   float64
 	distance            int
@@ -102,6 +119,7 @@ var (
 	// Tray Menu Items
 	mClickThrough  *systray.MenuItem
 	mSleep         *systray.MenuItem
+	mHide          *systray.MenuItem // Temporarily hide the cat
 	mTeleport      *systray.MenuItem // New feature!
 	mStayOnPrimary *systray.MenuItem
 	mRunOnStartup  *systray.MenuItem
@@ -168,28 +186,23 @@ processCmds:
 	dy := int(trgY - m.y)
 	m.distance = int(math.Sqrt(float64(dx*dx + dy*dy)))
 
-	// Stay on Primary Check - must be BEFORE the waiting check so we can wake up
-	if cfg.StayOnPrimary {
+	// Stay on Primary Check - only affects automatic sleep, not manual sleep
+	if cfg.StayOnPrimary && !m.manualSleep {
 		pw, ph := getPrimaryScreenRect()
 		if mx < 0 || mx > pw || my < 0 || my > ph {
 			// Mouse is off primary monitor - sleep if not already sleeping
 			if !m.waiting {
-				m.sendCmd(func(n *neko) {
-					n.waiting = true
-					n.state = 13 // Force sleep animation
-				})
+				m.waiting = true
+				m.state = 13 // Force sleep animation
 			}
 			m.stayIdle()
 			return nil
 		} else {
-			// Mouse is on primary monitor - wake up if was sleeping due to StayOnPrimary
-			// Note: This will also wake up manual sleep. If you want manual sleep to persist,
-			// disable "Stay on Primary" first.
-			if m.waiting {
-				m.sendCmd(func(n *neko) {
-					n.waiting = false
-					n.state = 0 // Reset state to allow normal animation
-				})
+			// Mouse is on primary monitor - wake up only if sleeping due to StayOnPrimary
+			// (not manual sleep)
+			if m.waiting && !m.manualSleep {
+				m.waiting = false
+				m.state = 0 // Reset state to allow normal animation
 				// Also uncheck the Sleep menu item since we're waking up
 				if mSleep != nil && mSleep.Checked() {
 					mSleep.Uncheck()
@@ -223,11 +236,15 @@ processCmds:
 	m.x += moveX
 	m.y += moveY
 
-	// Keep within monitor bounds
-	// Note: We use physical pixels here, assuming single monitor for simplicity
-	// (Multi-monitor clamping is complex, so we just clamp to 0,0 min)
-	m.x = math.Max(0, m.x)
-	m.y = math.Max(0, m.y)
+	// Keep within virtual screen bounds (all monitors)
+	// This properly handles multi-monitor setups including vertical arrangements
+	// and monitors with negative coordinates (left/above primary)
+	vx, vy, vw, vh := getVirtualScreenBounds()
+	catWidth := float64(winWidth) * scaleFactor
+	catHeight := float64(winHeight) * scaleFactor
+
+	m.x = math.Max(float64(vx), math.Min(m.x, float64(vx+vw)-catWidth))
+	m.y = math.Max(float64(vy), math.Min(m.y, float64(vy+vh)-catHeight))
 
 	// SetWindowPosition expects logical pixels, so we convert back.
 	logicalX := int(m.x / scaleFactor)
@@ -293,6 +310,14 @@ func (m *neko) catchCursor(dx, dy int) {
 }
 
 func (m *neko) Draw(screen *ebiten.Image) {
+	// Always clear the screen first
+	screen.Clear()
+
+	// If hidden, don't draw anything
+	if m.hidden {
+		return
+	}
+
 	var sprite string
 	switch {
 	case m.sprite == "awake":
@@ -321,9 +346,6 @@ func (m *neko) Draw(screen *ebiten.Image) {
 		}
 	}
 
-	// Always clear the screen to ensure transparency works correctly.
-	screen.Clear()
-
 	// Apply Transparency (Ghost Mode)
 	op := &ebiten.DrawImageOptions{}
 	op.ColorScale.ScaleAlpha(float32(cfg.Alpha))
@@ -344,6 +366,7 @@ func onReady() {
 	systray.SetTooltip("Neko Next- The Upgraded Desktop Cat")
 
 	mSleep = systray.AddMenuItemCheckbox("Sleep", "Put Neko to sleep", false)
+	mHide = systray.AddMenuItemCheckbox("Hide", "Temporarily hide Neko (still running)", false)
 	mTeleport = systray.AddMenuItem("Teleport to Mouse", "Bring Neko to you immediately")
 
 	systray.AddSeparator()
@@ -373,6 +396,7 @@ func onReady() {
 
 	systray.AddSeparator()
 	mRunOnStartup = systray.AddMenuItemCheckbox("Run on Startup", "Start automatically with Windows", cfg.RunOnStartup)
+	mRestart := systray.AddMenuItem("Restart", "Restart Neko")
 	mQuit := systray.AddMenuItem("Exit", "Bye bye Neko")
 
 	go func() {
@@ -382,6 +406,11 @@ func onReady() {
 				// Save settings before quitting
 				saveSettings()
 				systray.Quit()
+
+			case <-mRestart.ClickedCh:
+				// Save settings and restart the application
+				saveSettings()
+				restart()
 
 			// Teleport Logic
 			case <-mTeleport.ClickedCh:
@@ -395,13 +424,25 @@ func onReady() {
 			case <-mSleep.ClickedCh:
 				if mSleep.Checked() {
 					mSleep.Uncheck()
-					nekoInstance.sendCmd(func(n *neko) { n.waiting = false })
+					nekoInstance.sendCmd(func(n *neko) {
+						n.waiting = false
+						n.manualSleep = false
+					})
 				} else {
 					mSleep.Check()
 					nekoInstance.sendCmd(func(n *neko) {
 						n.waiting = true
+						n.manualSleep = true
 						n.state = 13 // Force sleep animation
 					})
+				}
+			case <-mHide.ClickedCh:
+				if mHide.Checked() {
+					mHide.Uncheck()
+					nekoInstance.sendCmd(func(n *neko) { n.hidden = false })
+				} else {
+					mHide.Check()
+					nekoInstance.sendCmd(func(n *neko) { n.hidden = true })
 				}
 			case <-mStayOnPrimary.ClickedCh:
 				if mStayOnPrimary.Checked() {
@@ -480,6 +521,35 @@ func saveSettings() {
 	if err != nil {
 		log.Printf("Error saving settings to neko_settings.json: %v", err)
 	}
+}
+
+func restart() {
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("Error getting executable path for restart: %v", err)
+		return
+	}
+
+	log.Println("Restarting Neko...")
+
+	// Start a new instance of the application
+	cmd := &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+
+	procAttr := &os.ProcAttr{
+		Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
+		Sys:   cmd,
+	}
+
+	_, err = os.StartProcess(exePath, []string{exePath}, procAttr)
+	if err != nil {
+		log.Printf("Error starting new process: %v", err)
+		return
+	}
+
+	// Exit the current instance
+	systray.Quit()
 }
 
 func setStartup(enabled bool) {

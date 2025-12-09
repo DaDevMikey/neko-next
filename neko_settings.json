@@ -4,6 +4,6 @@
   "Alpha": 1,
   "Quiet": false,
   "MousePassthrough": true,
-  "StayOnPrimary": true,
+  "StayOnPrimary": false,
   "RunOnStartup": true
 }
