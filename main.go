@@ -168,31 +168,38 @@ processCmds:
 	dy := int(trgY - m.y)
 	m.distance = int(math.Sqrt(float64(dx*dx + dy*dy)))
 
-	// Check if Neko is sleeping or waiting
-	if m.waiting {
-		m.stayIdle()
-		return nil
-	}
-
-	// Stay on Primary Check
+	// Stay on Primary Check - must be BEFORE the waiting check so we can wake up
 	if cfg.StayOnPrimary {
 		pw, ph := getPrimaryScreenRect()
 		if mx < 0 || mx > pw || my < 0 || my > ph {
-			if !m.waiting { // Only send the command if not already sleeping
+			// Mouse is off primary monitor - sleep if not already sleeping
+			if !m.waiting {
 				m.sendCmd(func(n *neko) {
 					n.waiting = true
 					n.state = 13 // Force sleep animation
 				})
 			}
+			m.stayIdle()
 			return nil
 		} else {
-			if m.waiting { // If back on primary and was sleeping, wake up
+			// Mouse is on primary monitor - wake up if was sleeping due to StayOnPrimary
+			if m.waiting {
 				m.sendCmd(func(n *neko) {
 					n.waiting = false
 					n.state = 0 // Reset state to allow normal animation
 				})
+				// Also uncheck the Sleep menu item since we're waking up
+				if mSleep != nil && mSleep.Checked() {
+					mSleep.Uncheck()
+				}
 			}
 		}
+	}
+
+	// Check if Neko is sleeping or waiting (for manual sleep toggle)
+	if m.waiting {
+		m.stayIdle()
+		return nil
 	}
 
 	// If close enough to the mouse, stop moving
@@ -325,7 +332,7 @@ func (m *neko) Draw(screen *ebiten.Image) {
 // --- TRAY MENU LOGIC ---
 
 func onReady() {
-	iconData, _ := f.ReadFile("assets/awake.png")
+	iconData, _ := f.ReadFile("assets/icon.ico")
 	systray.SetIcon(iconData)
 	systray.SetTitle("Neko Next")
 	systray.SetTooltip("Neko Next- The Upgraded Desktop Cat")

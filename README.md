@@ -1,65 +1,106 @@
-# Neko
+# Neko Next
 
 ![Neko](https://raw.githubusercontent.com/crgimenes/neko/master/assets/awake.png)
 
-[Neko](https://en.wikipedia.org/wiki/Neko_(software)) is a cat that chases the mouse cursor across the screen, an app written in the late 1980s and ported for many platforms.
+**Neko Next** is an enhanced fork of the classic desktop cat with a modern system tray interface! [Neko](https://en.wikipedia.org/wiki/Neko_(software)) is a cat that chases the mouse cursor across the screen, an app written in the late 1980s and ported for many platforms.
 
-![Neco](https://github.com/crgimenes/neko/blob/master/fixtures/neko.gif)
+![Neko](https://github.com/crgimenes/neko/blob/master/fixtures/neko.gif)
 
-This code is a re-implementation using Golang and **has no relationship to the original software**. Furthermore, this version does not use any part of the original source code except sprites and sounds.
+This enhanced version adds convenient system tray controls, customization options, and quality-of-life features while maintaining the nostalgic charm of the original.
 
-The goal is to demonstrate the Go language with a fun and very nostalgic example, without necessarily being tied to the behavior of the original version.
+## ✨ Features
 
-In this example, we used the [Ebitengine](https://ebitengine.org), an incredibly easy-to-use gaming library with a vibrant community.
+Neko Next includes a convenient **system tray menu** with the following options:
 
-## How to run
+- **Sleep Toggle** - Manually put Neko to sleep or wake them up
+- **Teleport to Mouse** - Instantly bring Neko to your cursor position
+- **Stay on Primary** - Automatically put Neko to sleep when your mouse leaves the primary monitor (Windows)
+- **Click Through Mode** - Let mouse clicks pass through Neko
+- **Sound Toggle** - Enable or disable Neko's sounds
+- **Adjustable Speed**
+  - Slow (1x)
+  - Normal (2x) - Default
+  - Zoomies! (4x)
+  - Ludicrous! (8x)
+- **Adjustable Size**
+  - Small (1x)
+  - Normal (2x) - Default
+  - Big (3x)
+- **Adjustable Opacity**
+  - Solid (100%) - Default
+  - Ghost (50%)
+  - Ninja (20%)
+- **Run on Startup** - Automatically start Neko Next with Windows
+- **Settings Persistence** - All your preferences are saved to `neko_settings.json`
 
-Note that some operating systems may restrict the execution of binaries downloaded from the internet for security reasons. Please consult your operating system documentation to learn how to enable Neko to run.
+## 🚀 Installation
 
+### Download Pre-built Binary
+Download the latest release from the [Releases](https://github.com/DaDevMikey/neko-next/releases) page.
+
+### Build from Source
+
+**Prerequisites:**
+- Go 1.24+ installed on your system
+- CGO enabled (required for Ebiten)
+
+**Windows:**
+```bash
+set CGO_ENABLED=1
+go build -o neko.exe main.go
+```
+
+**Linux/macOS:**
+```bash
+export CGO_ENABLED=1
+go build -o neko main.go
+```
+
+## 🎮 Usage
+
+Simply run the executable! Neko will appear on your screen and start chasing your mouse cursor. 
+
+- **System Tray Icon** - Right-click the cat icon in your system tray to access all settings
+- **Quit** - Select "Exit" from the system tray menu to close Neko
+
+All settings are automatically saved and will be restored the next time you run Neko.
+
+## 🛠️ Development
+
+**Run from source:**
 ```bash
 export CGO_ENABLED=1
 go run main.go
 ```
 
-Or you can build the binary and run it:
-
+**Install globally:**
 ```bash
-export CGO_ENABLED=1
-go build -o neko main.go
-```
-Parameters
-
-- `-mousepassthrough` Enable mouse passthrough (default false).
-- `-quiet` Disable sound.
-- `-scale` The scale of the cat on the screen (default 2.0).
-- `-speed` The speed of the cat (default 2).
-- `-h` Show help.
-
-## How to install
-
-Before installing Neko, make sure you have Go installed on your system, as we will be using `go install`.
-
-Install dependencies, build, and install the project into your Go bin directory:
-
-```bash
-cd neko
+cd neko-next
 go mod tidy
 go install
 ```
 
-To use Neko globally across your system, check if your Go bin directory is in your `$PATH` by running:
-
-```bash
-echo $PATH
-```
-If you don't see a Go bin directory, you'll need to add the following line to your `~/.bashrc`, `~/.zshrc`, or the equivalent shell configuration file:
-
+Make sure your Go bin directory is in your `$PATH`:
 ```bash
 export PATH=$PATH:$(go env GOPATH)/bin
 ```
 
-After that, you can simply run `neko` in your terminal. If you want it to start with your system, you can add it to your `.xinitrc` or a similar startup script.
+## 🎨 About
 
-## How to Contribute
+This code is a re-implementation using Golang and **has no relationship to the original software**. This version does not use any part of the original source code except sprites and sounds.
+
+Built with [Ebitengine](https://ebitengine.org), an incredibly easy-to-use gaming library with a vibrant community.
+
+## 🙏 Credits
+
+- Original Neko concept from the late 1980s
+- Base implementation inspired by [crgimenes/neko](https://github.com/crgimenes/neko)
+- Enhanced with system tray features by DaDevMikey
+
+## 🤝 Contributing
 
 Please follow our [contribution guide](CONTRIBUTING.md).
+
+## 📝 License
+
+See [LICENSE](LICENSE) file for details.
