@@ -183,6 +183,8 @@ processCmds:
 			return nil
 		} else {
 			// Mouse is on primary monitor - wake up if was sleeping due to StayOnPrimary
+			// Note: This will also wake up manual sleep. If you want manual sleep to persist,
+			// disable "Stay on Primary" first.
 			if m.waiting {
 				m.sendCmd(func(n *neko) {
 					n.waiting = false
@@ -332,8 +334,12 @@ func (m *neko) Draw(screen *ebiten.Image) {
 // --- TRAY MENU LOGIC ---
 
 func onReady() {
-	iconData, _ := f.ReadFile("assets/icon.ico")
-	systray.SetIcon(iconData)
+	iconData, err := f.ReadFile("assets/icon.ico")
+	if err != nil {
+		log.Printf("Warning: Failed to load system tray icon: %v", err)
+	} else {
+		systray.SetIcon(iconData)
+	}
 	systray.SetTitle("Neko Next")
 	systray.SetTooltip("Neko Next- The Upgraded Desktop Cat")
 
